@@ -1,0 +1,28 @@
+- job:
+    name: build-percona-mongodb-backup-release
+    description: |
+        Do not edit this job through the web!
+    concurrent: false
+    project-type: pipeline
+    properties:
+    - build-discarder:
+        artifact-days-to-keep: -1
+        artifact-num-to-keep: 10
+        days-to-keep: -1
+        num-to-keep: 10
+    pipeline-scm:
+      scm:
+        - git:
+            url: https://github.com/vorsel/percona-backup-mongodb.git
+            branches:
+            - 'master'
+            wipe-workspace: false
+      lightweight-checkout: true
+      script-path: pbm/jenkins/get-pbm-branches.groovy
+    triggers:
+    - pollscm:
+        cron: '*/5 * * * *'
+        ignore-post-commit-hooks: false
+    - script:
+        script: 'ls -laR; exit 0'
+        script-file-path: '$WORKSPACE/scripts'

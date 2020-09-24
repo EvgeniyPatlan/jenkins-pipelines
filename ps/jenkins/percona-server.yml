@@ -1,0 +1,15 @@
+- job:
+    name: ps-test-RELEASE
+    project-type: pipeline
+    description: |
+        Do not edit this job through the web!
+    pipeline-scm:
+      scm:
+        - git:
+            url: https://github.com/EvgeniyPatlan/jenkins-pipelines.git
+            branches:
+            - 'psjen'
+            wipe-workspace: false
+      lightweight-checkout: true
+      script-path: ps/jenkins/percona-server.groovy
+

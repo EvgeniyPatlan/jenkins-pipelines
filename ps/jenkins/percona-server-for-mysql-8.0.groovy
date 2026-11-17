@@ -1,10 +1,40 @@
 /* groovylint-disable DuplicateStringLiteral, GStringExpressionWithinString, LineLength */
-library changelog: false, identifier: 'lib@master', retriever: modernSCM([
+library changelog: false, identifier: 'lib@d5b1fcc62821af27c544b5caf17d84ed7275f44b', retriever: modernSCM([
     $class: 'GitSCMSource',
     remote: 'https://github.com/Percona-Lab/jenkins-pipelines.git'
 ]) _
 
 import groovy.transform.Field
+
+@Field final Map BUILD_IMAGES = [
+    'oraclelinux:8'    : 'oraclelinux:8@sha256:9225108d00fb6611ebc4a5eced166f27d9dcfeaa539fb127be79425f0da5e745',
+    'oraclelinux:9'    : 'oraclelinux:9@sha256:06f1c40f41e4026172cc2065103e313e454747ca48d40d165097c5297d764b38',
+    'amazonlinux:2023' : 'amazonlinux:2023@sha256:8ee95c4096d455555cb208d1dcea7b759235afab02253351d566d22d904f2198',
+    'ubuntu:focal'     : 'ubuntu:focal@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214',
+    'ubuntu:jammy'     : 'ubuntu:jammy@sha256:9abcaffc92a5279fff3a6a41635c0800ea33e528425fb389658806476e7defde',
+    'ubuntu:noble'     : 'ubuntu:noble@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8',
+    'debian:bullseye'  : 'debian:bullseye@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9',
+    'debian:bookworm'  : 'debian:bookworm@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8',
+]
+
+String pinnedImage(String image) {
+    if (image == 'none') {
+        return image
+    }
+    if (!BUILD_IMAGES.containsKey(image)) {
+        error("No pinned digest for build image ${image}")
+    }
+    return BUILD_IMAGES[image]
+}
+
+void checksumTarballs() {
+    sh '''
+        cd tarball
+        for f in *.tar.gz; do
+            sha256sum "${f}" > "${f}.sha256"
+        done
+    '''
+}
 void installCli(String PLATFORM) {
     sh """
         set -o xtrace
@@ -18,19 +48,28 @@ void installCli(String PLATFORM) {
             export RHVER=\$(rpm --eval %rhel)
             if [ \${RHVER} = "7" ]; then
                 sudo sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-* || true
-                sudo sed -i 's|#\\s*baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-* || true
+                sudo sed -i 's|#\\s*baseurl=http://mirror.centos.org|baseurl=https://vault.centos.org|g' /etc/yum.repos.d/CentOS-* || true
                 if [ -e "/etc/yum.repos.d/CentOS-SCLo-scl.repo" ]; then
                     cat /etc/yum.repos.d/CentOS-SCLo-scl.repo
                 fi
             fi
             sudo yum -y install wget curl unzip
         fi
-        curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip
+        AWSCLI_VERSION=2.40.4
+        AWSCLI_ARCH=\$(uname -m)
+        case \${AWSCLI_ARCH} in
+            x86_64) AWSCLI_SHA256=81f573c2a0ace70cfb97aa4d014c17cbd605cb04cbad09adbc7aaf9c0979ae8e ;;
+            aarch64) AWSCLI_SHA256=88961950fb3ef0b7190b40a1bccad0308b69186dbc575cb7c999b8c18959c635 ;;
+            *) echo "Unsupported architecture for awscli: \${AWSCLI_ARCH}"; exit 1 ;;
+        esac
+        curl -fsSL --proto '=https' -o awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-\${AWSCLI_ARCH}-\${AWSCLI_VERSION}.zip
+        echo "\${AWSCLI_SHA256}  awscliv2.zip" | sha256sum -c -
         unzip awscliv2.zip
         sudo ./aws/install || true
     """
 }
 void buildStage(String DOCKER_OS, String STAGE_PARAM) {
+    String image = pinnedImage(DOCKER_OS)
     withCredentials([string(credentialsId: 'GITHUB_API_TOKEN', variable: 'TOKEN')]) {
       sh """
           set -o xtrace
@@ -44,10 +83,16 @@ void buildStage(String DOCKER_OS, String STAGE_PARAM) {
               else
                   PRO_BRANCH="trunk"
               fi
-              curl -L -H "Authorization: Bearer \${TOKEN}" \
-                      -H "Accept: application/vnd.github.v3.raw" \
-                      -o ps_builder.sh \
-                      "https://api.github.com/repos/percona/percona-server-private-build/contents/build-ps/percona-server-8.0_builder.sh?ref=\${PRO_BRANCH}"
+              set +o xtrace
+              printf 'header = "Authorization: Bearer %s"\\n' "\${TOKEN}" | curl -fsSL -K - -o private-build.tar.gz \
+                      "https://api.github.com/repos/percona/percona-server-private-build/tarball/\${PRO_BRANCH}"
+              set -o xtrace
+              rm -rf private-build
+              mkdir private-build
+              tar -xzf private-build.tar.gz -C private-build --strip-components=1
+              echo "percona-server-private-build \${PRO_BRANCH}: \$(tar -tzf private-build.tar.gz | head -n1)"
+              cp private-build/build-ps/percona-server-8.0_builder.sh ps_builder.sh
+              mv -f private-build/build-ps test/.
               sed -i 's|percona-server-server/usr|percona-server-server-pro/usr|g' ps_builder.sh
               sed -i 's|dbg-package=percona-server-dbg|dbg-package=percona-server-pro-dbg|g' ps_builder.sh
           else
@@ -58,10 +103,6 @@ void buildStage(String DOCKER_OS, String STAGE_PARAM) {
           if [ "$DOCKER_OS" = "none" ]; then
               set -o xtrace
               cd \${build_dir}
-              if [ \${FIPSMODE} = "YES" ]; then
-                  git clone --depth 1 --branch \${PRO_BRANCH} https://x-access-token:${TOKEN}@github.com/percona/percona-server-private-build.git percona-server-private-build
-                  mv -f \${build_dir}/percona-server-private-build/build-ps \${build_dir}/test/.
-              fi
               if [ -f ./test/percona-server-8.0.properties ]; then
                   . ./test/percona-server-8.0.properties
               fi
@@ -72,13 +113,9 @@ void buildStage(String DOCKER_OS, String STAGE_PARAM) {
                   bash -x ./ps_builder.sh --builddir=\${build_dir}/test --repo=${GIT_REPO} --branch=${BRANCH} --perconaft_branch=${PERCONAFT_BRANCH} --tokubackup_branch=${TOKUBACKUP_BRANCH} --rpm_release=${RPM_RELEASE} --deb_release=${DEB_RELEASE} ${STAGE_PARAM}
               fi
           else
-              docker run -u root -v \${build_dir}:\${build_dir} ${DOCKER_OS} sh -c "
+              docker run -u root -v \${build_dir}:\${build_dir} ${image} sh -c "
                   set -o xtrace
                   cd \${build_dir}
-                  if [ \${FIPSMODE} = "YES" ]; then
-                      git clone --depth 1 --branch \${PRO_BRANCH} https://x-access-token:${TOKEN}@github.com/percona/percona-server-private-build.git percona-server-private-build
-                      mv -f \${build_dir}/percona-server-private-build/build-ps \${build_dir}/test/.
-                  fi
                   if [ -f ./test/percona-server-8.0.properties ]; then
                       . ./test/percona-server-8.0.properties
                   fi
@@ -846,6 +883,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -866,6 +904,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--debug=1 --build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -886,6 +925,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -906,6 +946,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--debug=1 --build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -928,6 +969,7 @@ parameters {
                             }
                         }
 
+                        checksumTarballs()
                         pushArtifactFolder("tarball/", AWS_STASH_PATH)
                     }
                 }
@@ -945,6 +987,7 @@ parameters {
                                 echo "The step is skipped"
                             } else {
                                 buildStage("none", "--build_tarball=1 --with_zenfs=1")
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -967,6 +1010,7 @@ parameters {
                             }
                         }
 
+                        checksumTarballs()
                         pushArtifactFolder("tarball/", AWS_STASH_PATH)
                     }
                 }
@@ -985,6 +1029,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -1005,6 +1050,7 @@ parameters {
                                 popArtifactFolder("source_tarball/", AWS_STASH_PATH)
                                 buildStage("none", "--debug=1 --build_tarball=1")
 
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -1027,6 +1073,7 @@ parameters {
                             }
                         }
 
+                        checksumTarballs()
                         pushArtifactFolder("tarball/", AWS_STASH_PATH)
                     }
                 }
@@ -1044,6 +1091,7 @@ parameters {
                                 echo "The step is skipped"
                             } else {
                                 buildStage("none", "--build_tarball=1 --with_zenfs=1")
+                                checksumTarballs()
                                 pushArtifactFolder("tarball/", AWS_STASH_PATH)
                             }
                         }
@@ -1066,6 +1114,7 @@ parameters {
                             }
                         }
 
+                        checksumTarballs()
                         pushArtifactFolder("tarball/", AWS_STASH_PATH)
                     }
                 }
@@ -1170,7 +1219,7 @@ parameters {
                             sudo apt-get install -y docker.io
                             sudo systemctl status docker
                             sudo apt-get install -y qemu binfmt-support qemu-user-static
-                            sudo docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+                            sudo docker run --rm --privileged multiarch/qemu-user-static@sha256:fe60359c92e86a43cc87b3d906006245f77bfc0565676b80004cc666e4feb9f0 --reset -p yes
                             git clone https://github.com/percona/percona-docker
                             cd percona-docker/percona-server-8.0
                             sed -i "s/ENV PS_VERSION.*/ENV PS_VERSION ${PS_RELEASE}.${RPM_RELEASE}/g" Dockerfile
@@ -1304,7 +1353,10 @@ parameters {
                     withCredentials([string(credentialsId: 'GITHUB_API_TOKEN', variable: 'TOKEN')]) {
                     sh """
                         set -x
-                        git clone https://jenkins-pxc-cd:$TOKEN@github.com/Percona-QA/package-testing.git
+                        export GIT_ASKPASS=\${WORKSPACE}/.git-askpass
+                        printf '#!/bin/sh\\necho "\$TOKEN"\\n' > \$GIT_ASKPASS
+                        chmod 700 \$GIT_ASKPASS
+                        git clone https://jenkins-pxc-cd@github.com/Percona-QA/package-testing.git
                         cd package-testing
                         git config user.name "jenkins-pxc-cd"
                         git config user.email "it+jenkins-pxc-cd@percona.com"
@@ -1346,9 +1398,9 @@ parameters {
                                 echo "Trigger PMM_PS Github Actions Workflow"
                                 withCredentials([string(credentialsId: 'Github_Integration', variable: 'Github_Integration')]) {
                                     sh """
-                                    curl -i -v -X POST \
+                                    set +x
+                                    printf 'header = "Authorization: token %s"\\n' "\${Github_Integration}" | curl -i -X POST -K - \
                                     -H "Accept: application/vnd.github.v3+json" \
-                                    -H "Authorization: token ${Github_Integration}" \
                                     "https://api.github.com/repos/Percona-Lab/qa-integration/actions/workflows/PMM_PS.yaml/dispatches" \
                                     -d '{"ref":"main","inputs":{"ps_version":"${PS_RELEASE}"}}'
                                     """ 

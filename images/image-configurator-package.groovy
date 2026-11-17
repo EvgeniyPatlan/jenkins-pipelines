@@ -182,15 +182,15 @@ pipeline {
             agent { label 'master' }
             steps {
                 unstash 'gitCommit'
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     sh """
                         export path_to_build="${DESTINATION}/BUILDS/image-configurator/image-configurator-${VERSION}/${GIT_BRANCH}/\$(cat shortCommit)/${BUILD_NUMBER}"
 
-                        ssh -i ~/.ssh/id_rsa uploader@repo.ci.percona.com " \
-                            /bin/bash -xc ' \
-                                ls UPLOAD/\${path_to_build}/binary/redhat/7/x86_64/*.rpm \
-                                    | xargs -n 1 signpackage --verbose --password ${SIGN_PASSWORD} --rpm \
-                            '"
+                        ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile="\${KNOWN_HOSTS}" -i ~/.ssh/id_rsa uploader@repo.ci.percona.com \
+                            bash -s -- "\${path_to_build}" <<'REMOTE'
+set -e
+ls UPLOAD/"\$1"/binary/redhat/7/x86_64/*.rpm | xargs -n 1 signpackage --verbose --rpm
+REMOTE
                     """
                 }
             }

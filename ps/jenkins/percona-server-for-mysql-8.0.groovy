@@ -24,6 +24,161 @@ import groovy.transform.Field
 
 @Field String PS_SERIES = ''
 
+// Test job overlay (branch test-build-hardening only): nothing below publishes.
+@Field final boolean TEST_MODE = true
+
+void testSkip(String step) {
+    echo "TEST_MODE: skipped ${step}"
+}
+void testSlackNotify(def a0, def a1, def a2) { testSkip("slackNotify") }
+void testUploadRPMfromAWS(def a0, def a1) { testSkip("uploadRPMfromAWS") }
+void testUploadDEBfromAWS(def a0, def a1) { testSkip("uploadDEBfromAWS") }
+void testUploadTarballfromAWS(def a0, def a1, def a2) { testSkip("uploadTarballfromAWS") }
+void testSignRPM() { testSkip("signRPM") }
+void testSignDEB() { testSkip("signDEB") }
+void testSync2ProdAutoBuild(def a0, def a1) { testSkip("sync2ProdAutoBuild") }
+void testSync2PrivateProdAutoBuild(def a0, def a1) { testSkip("sync2PrivateProdAutoBuild") }
+void testUploadTarballToDownloadsTesting(def a0, def a1) { testSkip("uploadTarballToDownloadsTesting") }
+
+void verifyTestArtifacts(String stashPath, String arch) {
+    for (String folder : ['source_tarball/', 'srpm/', 'source_deb/', 'rpm/', 'deb/', 'tarball/']) {
+        popArtifactFolder(folder, stashPath)
+    }
+    withEnv(["ARCH=${arch}",
+             "RPM_IMAGE=${BUILD_IMAGES['oraclelinux:9']}",
+             "DEB_IMAGE=${BUILD_IMAGES['ubuntu:jammy']}"]) {
+        writeFile file: 'verify-test-artifacts.sh', text: '''#!/bin/bash
+set -o nounset -o pipefail
+failures=0
+fail() { echo "FAIL: $*"; failures=$((failures + 1)); }
+pass() { echo "PASS: $*"; }
+case "${ARCH}" in
+    amd64) RPM_ARCH=x86_64 ;;
+    arm64) RPM_ARCH=aarch64 ;;
+    *) echo "unknown arch ${ARCH}"; exit 1 ;;
+esac
+shopt -s nullglob
+
+if [ "${ARCH}" = amd64 ]; then
+    for d in source_tarball srpm source_deb; do
+        n=$(find "${d}" -type f 2>/dev/null | wc -l)
+        [ "${n}" -gt 0 ] && pass "${d}: ${n} files" || fail "${d} is empty"
+    done
+fi
+rpms=(rpm/*."${RPM_ARCH}".rpm)
+debs=(deb/*_"${ARCH}".deb)
+tarballs=(tarball/*."${RPM_ARCH}".*.tar.gz)
+[ ${#rpms[@]} -gt 0 ] && pass "${#rpms[@]} ${RPM_ARCH} rpms" || fail "no ${RPM_ARCH} rpms"
+[ ${#debs[@]} -gt 0 ] && pass "${#debs[@]} ${ARCH} debs" || fail "no ${ARCH} debs"
+[ ${#tarballs[@]} -gt 0 ] && pass "${#tarballs[@]} ${RPM_ARCH} tarballs" || fail "no ${RPM_ARCH} tarballs"
+
+for t in "${tarballs[@]}"; do
+    name=$(basename "${t}")
+    if [ -f "${t}.sha256" ] && (cd tarball && sha256sum --quiet -c "${name}.sha256"); then
+        pass "${name}: sha256 matches"
+    else
+        fail "${name}: missing or wrong .sha256"
+    fi
+    tar -tzf "${t}" > tarball-list.txt
+    grep -q '/lib/private/BUNDLED-LIBS.txt$' tarball-list.txt && pass "${name}: BUNDLED-LIBS.txt present" || fail "${name}: no BUNDLED-LIBS.txt"
+done
+rm -f tarball-list.txt
+
+cat > check-callhome.sh <<'EOF'
+check_scriptlet() {
+    if grep -q 'mktemp -d' "$2" && grep -q 'rm -rf "$(dirname "$tfn")"' "$2"; then
+        echo "PASS: $1 runs call-home from a private temp dir and removes it"
+    else
+        echo "FAIL: $1 call-home temp handling"; return 1
+    fi
+    if grep -q '/tmp/call-home.sh' "$2"; then
+        echo "FAIL: $1 still references /tmp/call-home.sh"; return 1
+    fi
+}
+# The server packages depend on percona-telemetry-agent, which is not built here; an empty
+# package of that name keeps the install offline and the agent from running.
+placeholder_telemetry_deb() {
+    mkdir -p /root/pta/DEBIAN
+    printf 'Package: percona-telemetry-agent\\nVersion: 0.0-test\\nArchitecture: all\\nMaintainer: test\\nDescription: placeholder\\n' > /root/pta/DEBIAN/control
+    dpkg-deb -b /root/pta /root/percona-telemetry-agent.deb >/dev/null
+}
+placeholder_telemetry_rpm() {
+    dnf -y -q install rpm-build >/dev/null || return 1
+    printf 'Name: percona-telemetry-agent\\nVersion: 0.0\\nRelease: test\\nSummary: placeholder\\nLicense: none\\nBuildArch: noarch\\n%%description\\nplaceholder\\n%%files\\n' > /root/pta.spec
+    rpmbuild -bb --quiet /root/pta.spec >/dev/null
+}
+tmp_before() { find /tmp -mindepth 1 -maxdepth 1 | sort > /root/tmp-before.txt; }
+tmp_after() {
+    find /tmp -mindepth 1 -maxdepth 1 | sort > /root/tmp-after.txt
+    if [ -e /tmp/call-home.sh ] || comm -13 /root/tmp-before.txt /root/tmp-after.txt | grep -q .; then
+        echo "FAIL: install left files in /tmp:"; comm -13 /root/tmp-before.txt /root/tmp-after.txt; return 1
+    fi
+    echo "PASS: install left nothing in /tmp"
+}
+smoke_mysqld() {
+    mysqld --version || { echo "FAIL: mysqld --version"; return 1; }
+    rm -rf /var/tmp/verify-datadir
+    if mysqld --no-defaults --initialize-insecure --user=root --datadir=/var/tmp/verify-datadir >/var/tmp/init.log 2>&1; then
+        echo "PASS: mysqld --initialize-insecure"
+    else
+        cat /var/tmp/init.log; echo "FAIL: mysqld --initialize-insecure"; return 1
+    fi
+}
+EOF
+
+if [ ${#rpms[@]} -gt 0 ]; then
+    docker run --rm --platform "linux/${ARCH}" -e PERCONA_TELEMETRY_DISABLE=1 -e RPM_ARCH="${RPM_ARCH}" \\
+        -v "${PWD}/rpm:/rpm:ro" -v "${PWD}/check-callhome.sh:/check-callhome.sh:ro" "${RPM_IMAGE}" bash -c '
+        set -o pipefail
+        . /check-callhome.sh
+        rc=0
+        shopt -s nullglob
+        srv=(/rpm/percona-server-server-[0-9]*.el9.${RPM_ARCH}.rpm)
+        [ ${#srv[@]} -gt 0 ] || { echo "FAIL: no el9 ${RPM_ARCH} server rpm"; exit 1; }
+        rpm -qp --scripts "${srv[0]}" > /root/scripts.txt
+        check_scriptlet "$(basename "${srv[0]}") %post" /root/scripts.txt || rc=1
+        pkgs=$(ls /rpm/*.el9.${RPM_ARCH}.rpm | grep -E "/percona-(server-(server|client|shared)|icu-data-files)-[0-9]")
+        placeholder_telemetry_rpm || exit 1
+        tmp_before
+        dnf -y -q install ${pkgs} /root/rpmbuild/RPMS/noarch/percona-telemetry-agent-*.rpm || { echo "FAIL: dnf install"; exit 1; }
+        echo "PASS: el9 ${RPM_ARCH} packages installed"
+        tmp_after || rc=1
+        smoke_mysqld || rc=1
+        exit ${rc}
+    ' || fail "el9 ${RPM_ARCH} package checks"
+fi
+
+if [ ${#debs[@]} -gt 0 ]; then
+    docker run --rm --platform "linux/${ARCH}" -e PERCONA_TELEMETRY_DISABLE=1 -e ARCH="${ARCH}" -e DEBIAN_FRONTEND=noninteractive \\
+        -v "${PWD}/deb:/deb:ro" -v "${PWD}/check-callhome.sh:/check-callhome.sh:ro" "${DEB_IMAGE}" bash -c '
+        set -o pipefail
+        . /check-callhome.sh
+        rc=0
+        shopt -s nullglob
+        srv=(/deb/percona-server-server_*.jammy_${ARCH}.deb)
+        [ ${#srv[@]} -gt 0 ] || { echo "FAIL: no jammy ${ARCH} server deb"; exit 1; }
+        dpkg-deb -e "${srv[0]}" /root/ctl
+        check_scriptlet "$(basename "${srv[0]}") postinst" /root/ctl/postinst || rc=1
+        apt-get update -qq
+        placeholder_telemetry_deb || exit 1
+        tmp_before
+        apt-get install -y -qq /root/percona-telemetry-agent.deb /deb/percona-server-common_*.jammy_${ARCH}.deb \\
+            /deb/percona-server-client_*.jammy_${ARCH}.deb /deb/percona-server-server_*.jammy_${ARCH}.deb \\
+            || { echo "FAIL: apt-get install"; exit 1; }
+        echo "PASS: jammy ${ARCH} packages installed"
+        tmp_after || rc=1
+        smoke_mysqld || rc=1
+        exit ${rc}
+    ' || fail "jammy ${ARCH} package checks"
+fi
+
+echo "failures: ${failures}"
+[ "${failures}" -eq 0 ]
+'''
+        sh "#!/bin/bash\nset -o pipefail\nbash verify-test-artifacts.sh 2>&1 | tee verify-${arch}.txt"
+    }
+}
+
 String pinnedImage(String image) {
     if (image == 'none') {
         return image
@@ -190,7 +345,7 @@ def installDependencies(def nodeName) {
             echo "Unexpected node name: ${nodeName}"
         }
     } catch (Exception e) {
-        slackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: Server Provision for Mini Package Testing for ${nodeName} at ${BRANCH}  FAILED !!")
+        testSlackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: Server Provision for Mini Package Testing for ${nodeName} at ${BRANCH}  FAILED !!")
     }
 }
 
@@ -401,8 +556,8 @@ pipeline {
         label 'docker'
     }
 parameters {
-        string(defaultValue: 'https://github.com/percona/percona-server.git', description: 'github repository for build', name: 'GIT_REPO')
-        string(defaultValue: 'release-8.0.28-19', description: 'Tag/Branch for percona-server repository', name: 'BRANCH')
+        string(defaultValue: 'https://github.com/EvgeniyPatlan/percona-server.git', description: 'github repository for build', name: 'GIT_REPO')
+        string(defaultValue: 'sec-build-hardening-8.4', description: 'Tag/Branch for percona-server repository', name: 'BRANCH')
         string(defaultValue: '1', description: 'RPM version', name: 'RPM_RELEASE')
         string(defaultValue: '1', description: 'DEB version', name: 'DEB_RELEASE')
         choice(
@@ -422,7 +577,7 @@ parameters {
             description: 'Compile with ZenFS support?, only affects Ubuntu Hirsute',
             name: 'ENABLE_ZENFS')
         choice(
-            choices: 'NO\nYES',
+            choices: 'NO',
             description: 'Enable fipsmode',
             name: 'FIPSMODE')
         choice(
@@ -466,7 +621,7 @@ parameters {
                label 'docker-32gb'
             }
             steps {
-                slackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: starting build for ${BRANCH} - [${BUILD_URL}]")
+                testSlackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: starting build for ${BRANCH} - [${BUILD_URL}]")
                 cleanUpWS()
                 installCli("rpm")
                 script {
@@ -478,7 +633,7 @@ parameters {
                        }
                 sh '''
                    REPO_UPLOAD_PATH=$(grep "UPLOAD" test/percona-server-8.0.properties | cut -d = -f 2 | sed "s:$:${BUILD_NUMBER}:")
-                   AWS_STASH_PATH=$(echo ${REPO_UPLOAD_PATH} | sed  "s:UPLOAD/experimental/::")
+                   AWS_STASH_PATH=test-sec-build-hardening/$(echo ${REPO_UPLOAD_PATH} | sed  "s:UPLOAD/experimental/::")
                    echo ${REPO_UPLOAD_PATH} > uploadPath
                    echo ${AWS_STASH_PATH} > awsUploadPath
                    cat test/percona-server-8.0.properties
@@ -495,7 +650,7 @@ parameters {
                     echo "PS series: ${PS_SERIES}"
                 }
                 pushArtifactFolder("source_tarball/", AWS_STASH_PATH)
-                uploadTarballfromAWS("source_tarball/", AWS_STASH_PATH, 'source')
+                testUploadTarballfromAWS("source_tarball/", AWS_STASH_PATH, 'source')
             }
         }
         stage('Build PS generic source packages') {
@@ -518,7 +673,7 @@ parameters {
                         }
 
                         pushArtifactFolder("srpm/", AWS_STASH_PATH)
-                        uploadRPMfromAWS("srpm/", AWS_STASH_PATH)
+                        testUploadRPMfromAWS("srpm/", AWS_STASH_PATH)
                     }
                 }
                 stage('Build PS generic source deb') {
@@ -539,7 +694,7 @@ parameters {
                         }
 
                         pushArtifactFolder("source_deb/", AWS_STASH_PATH)
-                        uploadDEBfromAWS("source_deb/", AWS_STASH_PATH)
+                        testUploadDEBfromAWS("source_deb/", AWS_STASH_PATH)
                     }
                 }
             }  //parallel
@@ -1138,7 +1293,45 @@ parameters {
                 }
             }
         }
+        stage('Verify artifacts') {
+            parallel {
+                stage('amd64') {
+                    agent {
+                        label 'docker-32gb'
+                    }
+                    steps {
+                        cleanUpWS()
+                        installCli("rpm")
+                        verifyTestArtifacts(AWS_STASH_PATH, 'amd64')
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'verify-*.txt', allowEmptyArchive: true
+                        }
+                    }
+                }
+                stage('arm64') {
+                    agent {
+                        label 'docker-32gb-aarch64'
+                    }
+                    steps {
+                        cleanUpWS()
+                        installCli("rpm")
+                        verifyTestArtifacts(AWS_STASH_PATH, 'arm64')
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'verify-*.txt', allowEmptyArchive: true
+                        }
+                    }
+                }
+            }
+        }
         stage('Upload packages and tarballs from S3') {
+            when {
+                beforeAgent true
+                expression { !TEST_MODE }
+            }
             agent {
                 label 'min-jammy-x64'
             }
@@ -1147,19 +1340,27 @@ parameters {
                 installCli("deb")
                 unstash 'properties'
 
-                uploadRPMfromAWS("rpm/", AWS_STASH_PATH)
-                uploadDEBfromAWS("deb/", AWS_STASH_PATH)
-                uploadTarballfromAWS("tarball/", AWS_STASH_PATH, 'binary')
+                testUploadRPMfromAWS("rpm/", AWS_STASH_PATH)
+                testUploadDEBfromAWS("deb/", AWS_STASH_PATH)
+                testUploadTarballfromAWS("tarball/", AWS_STASH_PATH, 'binary')
             }
         }
 
         stage('Sign packages') {
+            when {
+                beforeAgent true
+                expression { !TEST_MODE }
+            }
             steps {
-                signRPM()
-                signDEB()
+                testSignRPM()
+                testSignDEB()
             }
         }
         stage('Push to public repository') {
+            when {
+                beforeAgent true
+                expression { !TEST_MODE }
+            }
             steps {
                 unstash 'properties'
                 script {
@@ -1168,22 +1369,22 @@ parameters {
                     // sync packages
                     if ("${MYSQL_VERSION_MINOR}" == "0") {
                         if (env.FIPSMODE == 'YES') {
-                            sync2PrivateProdAutoBuild("ps-80-pro", COMPONENT)
+                            testSync2PrivateProdAutoBuild("ps-80-pro", COMPONENT)
                         } else {
-                            sync2ProdAutoBuild("ps-80", COMPONENT)
+                            testSync2ProdAutoBuild("ps-80", COMPONENT)
                         }
                     } else {
                         if (env.FIPSMODE == 'YES') {
                             if ("${MYSQL_VERSION_MINOR}" == "4") {
-                                sync2PrivateProdAutoBuild("ps-84-pro", COMPONENT)
+                                testSync2PrivateProdAutoBuild("ps-84-pro", COMPONENT)
                             } else {
-                                sync2PrivateProdAutoBuild("ps-8x-innovation-pro", COMPONENT)
+                                testSync2PrivateProdAutoBuild("ps-8x-innovation-pro", COMPONENT)
                             }
                         } else {
                             if ("${MYSQL_VERSION_MINOR}" == "4") {
-                                sync2ProdAutoBuild("ps-84-lts", COMPONENT)
+                                testSync2ProdAutoBuild("ps-84-lts", COMPONENT)
                             } else {
-                                sync2ProdAutoBuild("ps-8x-innovation", COMPONENT)
+                                testSync2ProdAutoBuild("ps-8x-innovation", COMPONENT)
                             }
                         }
                     }
@@ -1191,13 +1392,17 @@ parameters {
             }
         }
         stage('Push Tarballs to TESTING download area') {
+            when {
+                beforeAgent true
+                expression { !TEST_MODE }
+            }
             steps {
                 script {
                     try {
                         if (env.FIPSMODE == 'YES') {
-                            uploadTarballToDownloadsTesting("ps-gated", "${BRANCH}")
+                            testUploadTarballToDownloadsTesting("ps-gated", "${BRANCH}")
                         } else {
-                            uploadTarballToDownloadsTesting("ps", "${BRANCH}")
+                            testUploadTarballToDownloadsTesting("ps", "${BRANCH}")
                         }
                     }
                     catch (err) {
@@ -1208,6 +1413,10 @@ parameters {
             }
         }
         stage('Build docker containers') {
+            when {
+                beforeAgent true
+                expression { !TEST_MODE }
+            }
             agent {
                 label 'min-focal-x64'
             }
@@ -1340,117 +1549,12 @@ parameters {
     post {
         success {
             script {
-                if (env.FIPSMODE == 'YES') {
-                    slackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: PRO build has been finished successfully for ${BRANCH} - [${BUILD_URL}]")
-                } else {
-                    slackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: build has been finished successfully for ${BRANCH} - [${BUILD_URL}]")
-                }
-            } 
-            slackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: Triggering Builds for Package Testing for ${BRANCH} - [${BUILD_URL}]")
-            unstash 'properties'
-            script {
-                currentBuild.description = "Built on ${BRANCH}; path to packages: ${COMPONENT}/${AWS_STASH_PATH}"
-                env.PS_REVISION = sh(returnStdout: true, script: "grep REVISION test/percona-server-8.0.properties | awk -F '=' '{ print\$2 }'").trim()
-                sh "cat test/percona-server-8.0.properties"
-                echo "Revision is: ${env.PS_REVISION}"
-                echo "PS_RELEASE is: ${PS_RELEASE}"
-                echo "PS_VERSION_SHORT_KEY is: ${PS_VERSION_SHORT_KEY}"
-                echo "Value is : ${PS_VERSION_SHORT}"
-                echo "DOCKER account is : ${DOCKER_ACC}"
-
-                if (env.product_to_test == 'PS80') {
-                    echo "Running PS80-specific steps"
-                } else if (env.product_to_test == 'PS84') {
-                    echo "Running PS84-specific steps"
-                } else {
-                    echo "Running client test"
-                }
-                 if("${PS_VERSION_SHORT}"){
-                    echo "Executing MINITESTS as VALID VALUES FOR PS8_RELEASE_VERSION:${PS_VERSION_SHORT}"
-                    echo "Checking for the Github Repo VERSIONS file changes..."
-                    withCredentials([string(credentialsId: 'GITHUB_API_TOKEN', variable: 'TOKEN')]) {
-                    sh """
-                        set -x
-                        export GIT_ASKPASS=\${WORKSPACE}/.git-askpass
-                        printf '#!/bin/sh\\necho "\$TOKEN"\\n' > \$GIT_ASKPASS
-                        chmod 700 \$GIT_ASKPASS
-                        git clone https://jenkins-pxc-cd@github.com/Percona-QA/package-testing.git
-                        cd package-testing
-                        git config user.name "jenkins-pxc-cd"
-                        git config user.email "it+jenkins-pxc-cd@percona.com"
-                        git checkout master
-                        echo "${PS_VERSION_SHORT} is the VALUE!!@!"
-                        export RELEASE_VER_VAL="${PS_VERSION_SHORT}"
-                        if [[ "\$RELEASE_VER_VAL" =~ ^PS8[0-9]{1}\$ ]]; then
-                            echo "\$RELEASE_VER_VAL is a valid version"
-                            OLD_REV=\$(cat VERSIONS | grep ${PS_VERSION_SHORT}_REV | cut -d '=' -f2- )
-                            echo "OLD_REV is : \${OLD_REV}"
-                            OLD_VER=\$(cat VERSIONS | grep ${PS_VERSION_SHORT}_VER | cut -d '=' -f2- )
-                            echo "OLD_VER is : \${OLD_VER}"
-                            sed -i s/${PS_VERSION_SHORT}_REV=\$OLD_REV/${PS_VERSION_SHORT}_REV='"'${PS_REVISION}'"'/g VERSIONS
-                            sed -i s/${PS_VERSION_SHORT}_VER=\$OLD_VER/${PS_VERSION_SHORT}_VER='"'${PS_RELEASE}'"'/g VERSIONS
-                            echo 
-
-                        else
-                            echo "INVALID PS8_RELEASE_VERSION VALUE: ${PS_VERSION_SHORT}"
-                        fi
-                        git diff
-                        if [[ -z \$(git diff) ]]; then
-                            echo "No changes"
-                        else
-                            echo "There are changes"
-                            git add -A
-                        git commit -m "Autocommit: add ${PS_REVISION} and ${PS_RELEASE} for ${PS_VERSION_SHORT} package testing VERSIONS file."
-                            git push
-                        fi
-                    """
-                    }
-                    parallel(
-                        "Start Minitests for PS": {
-                             try {
-                                package_tests_ps80(minitestNodes)
-                                echo "Minitests completed successfully. Triggering next stages."
-                                slackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: minitest sucessfully run for ${BRANCH} - [${BUILD_URL}]")
-                                echo "TRIGGERING THE PACKAGE TESTING JOB!!!"
-                                build job: 'ps-package-testing-molecule', propagate: false, wait: false, parameters: [string(name: 'product_to_test', value: "${product_to_test}"),string(name: 'install_repo', value: "testing"),string(name: 'action_to_test', value: "install"),string(name: 'check_warnings', value: "yes"),string(name: 'install_mysql_shell', value: "no")]
-                                echo "Trigger PMM_PS Github Actions Workflow"
-                                withCredentials([string(credentialsId: 'Github_Integration', variable: 'Github_Integration')]) {
-                                    sh """
-                                    set +x
-                                    printf 'header = "Authorization: token %s"\\n' "\${Github_Integration}" | curl -i -X POST -K - \
-                                    -H "Accept: application/vnd.github.v3+json" \
-                                    "https://api.github.com/repos/Percona-Lab/qa-integration/actions/workflows/PMM_PS.yaml/dispatches" \
-                                    -d '{"ref":"main","inputs":{"ps_version":"${PS_RELEASE}"}}'
-                                    """ 
-                                    }
-                                slackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: PMM sucessfully run for ${BRANCH} - [${BUILD_URL}]")
-                            } catch (err) {
-                                    echo " Minitests block failed: ${err}"
-                                    currentBuild.result = 'FAILURE'
-                                    throw err
-                                }
-                        },
-                        "Start docker job": {
-                            try {
-                                docker_test()
-                                echo "DOCKER images run successfully."
-                            }   catch (err) {
-                                echo "Docker test block failed: ${err}"
-                                currentBuild.result = 'FAILURE'
-                                throw err
-                            }
-                            }
-                    )          
-                }    
-                        else{
-                            error "Skipping MINITESTS and Other Triggers as invalid RELEASE VERSION FOR THIS JOB"
-                            slackNotify("${SLACKNOTIFY}", "#00FF00", "[${JOB_NAME}]: Skipping MINITESTS and Other Triggers as invalid RELEASE VERSION FOR THIS JOB ${BRANCH} - [${BUILD_URL}]")
-                        }
-                    }
-                        deleteDir()
+                currentBuild.description = "TEST ${GIT_REPO} ${BRANCH} - s3://percona-jenkins-artifactory/${AWS_STASH_PATH}"
+            }
+            deleteDir()
         }
         failure {
-            slackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: build failed for ${BRANCH} - [${BUILD_URL}]")
+            testSlackNotify("${SLACKNOTIFY}", "#FF0000", "[${JOB_NAME}]: build failed for ${BRANCH} - [${BUILD_URL}]")
             script {
                 currentBuild.description = "Built on ${BRANCH}"
             }

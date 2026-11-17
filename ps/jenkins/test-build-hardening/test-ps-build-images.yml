@@ -1,0 +1,17 @@
+- job:
+    name: test-ps-build-images
+    project-type: pipeline
+    description: |
+        Test copy of ps-build-images for the build hardening branches. Runs ps/jenkins/ps-build-images.groovy
+        from https://github.com/EvgeniyPatlan/jenkins-pipelines.git (test-build-hardening) with TEST_MODE on: builds and verifies packages, stashes them
+        under s3://percona-jenkins-artifactory/test-sec-build-hardening/, and never signs, uploads to repo.ci,
+        syncs, pushes images or notifies. Delete when the branches are merged.
+    pipeline-scm:
+      scm:
+        - git:
+            url: https://github.com/EvgeniyPatlan/jenkins-pipelines.git
+            branches:
+            - 'test-build-hardening'
+            wipe-workspace: false
+      lightweight-checkout: true
+      script-path: ps/jenkins/ps-build-images.groovy

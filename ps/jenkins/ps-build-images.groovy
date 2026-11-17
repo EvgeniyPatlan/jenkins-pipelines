@@ -22,13 +22,13 @@ import groovy.transform.Field
 ]
 
 @Field final Map SERIES = [
-    '8.0': [branch: '8.0', builder: 'build-ps/percona-server-8.0_builder.sh'],
-    '8.4': [branch: '8.4', builder: 'build-ps/percona-server-8.0_builder.sh'],
-    '9.7': [branch: '9.7', builder: 'build-ps/percona-server-9.0_builder.sh'],
+    '8.0': [branch: 'sec-build-hardening-8.0', builder: 'build-ps/percona-server-8.0_builder.sh'],
+    '8.4': [branch: 'sec-build-hardening-8.4', builder: 'build-ps/percona-server-8.0_builder.sh'],
+    '9.7': [branch: 'sec-build-hardening-9.7', builder: 'build-ps/percona-server-9.0_builder.sh'],
 ]
 
-@Field final String BUILDER_REPO = 'https://github.com/percona/percona-server'
-@Field final String IMAGE_REPO = 'perconalab/ps-build'
+@Field final String BUILDER_REPO = 'https://github.com/EvgeniyPatlan/percona-server'
+@Field final String IMAGE_REPO = 'local/ps-build-test'
 
 List archesFor(String os) {
     return AMD64_ONLY.contains(os) ? ['amd64'] : ['amd64', 'arm64']
@@ -51,10 +51,9 @@ void buildOne(String series, String commit, String os, String arch, String tag) 
     node(ARCH_LABELS[arch]) {
         deleteDir()
         checkout scm
-        dockerLogin()
         withEnv([
             "BASE_IMAGE=${BASE_IMAGES[os]}",
-            "BUILDER_URL=https://raw.githubusercontent.com/percona/percona-server/${commit}/${SERIES[series].builder}",
+            "BUILDER_URL=https://raw.githubusercontent.com/EvgeniyPatlan/percona-server/${commit}/${SERIES[series].builder}",
             "BUILDER_COMMIT=${commit}",
             "BUILDER_REPO=${BUILDER_REPO}",
             "ARCH_TAG=${tag}-${arch}",
@@ -72,7 +71,7 @@ void buildOne(String series, String commit, String os, String arch, String tag) 
                     -t "${ARCH_TAG}" context
                 docker run --rm "${ARCH_TAG}" sh -c 'test -s /usr/share/ps-build/installed-packages.txt && command -v cmake && command -v make'
                 docker run --rm "${ARCH_TAG}" cat /usr/share/ps-build/installed-packages.txt > "installed-packages-${ARCH_TAG##*:}.txt"
-                docker push "${ARCH_TAG}"
+                docker image rm "${ARCH_TAG}"
             '''
         }
         archiveArtifacts artifacts: 'installed-packages-*.txt'
@@ -103,7 +102,7 @@ String publishManifest(String tag, List arches) {
 pipeline {
     agent none
     parameters {
-        choice(name: 'PS_SERIES', choices: ['all', '8.0', '8.4', '9.7'], description: 'PS series to build images for')
+        choice(name: 'PS_SERIES', choices: ['8.4', '8.0', '9.7', 'all'], description: 'PS series to build images for')
     }
     options {
         buildDiscarder(logRotator(numToKeepStr: '20'))
@@ -139,8 +138,7 @@ pipeline {
                         parallel builds
                         BASE_IMAGES.keySet().each { String os ->
                             String tag = imageTag(series, os, stamp)
-                            String digest = publishManifest(tag, archesFor(os))
-                            entries << "    ${"'${series}/${os}'".padRight(24)}: '${tag}@${digest}',"
+                            entries << "    // ${series}/${os}: built and checked ${tag} (${archesFor(os).join(', ')}), not pushed"
                         }
                     }
                     String block = "@Field final Map PREPARED_IMAGES = [\n${entries.join('\n')}\n]\n"

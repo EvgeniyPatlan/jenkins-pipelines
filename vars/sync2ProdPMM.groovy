@@ -3,10 +3,11 @@ def call(String DESTINATION, String SYNC_PMM_CLIENT, String OS_VERSION) {
         unstash 'uploadPath'
         def path_to_build = sh(returnStdout: true, script: "cat uploadPath").trim()
 
-        withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+        withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
             withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', usernameVariable: 'USER')]) {
                 sh """
-                    ssh -o StrictHostKeyChecking=no -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                    ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                        gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                         set -o errexit
                         set -o xtrace
 
@@ -34,7 +35,7 @@ def call(String DESTINATION, String SYNC_PMM_CLIENT, String OS_VERSION) {
                                     if [ -f \${repo_path}/repodata/repomd.xml.asc ]; then
                                         rm -f \${repo_path}/repodata/repomd.xml.asc
                                     fi
-                                    gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} \${repo_path}/repodata/repomd.xml 
+                                    gpg --detach-sign --armor \${repo_path}/repodata/repomd.xml 
                                 done
 
                                 # SRPMS
@@ -46,7 +47,7 @@ def call(String DESTINATION, String SYNC_PMM_CLIENT, String OS_VERSION) {
                                 if [ -f \${dest_path}/SRPMS/repodata/repomd.xml.asc ]; then
                                     rm -f \${dest_path}/SRPMS/repodata/repomd.xml.asc
                                 fi
-                                gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} \${dest_path}/SRPMS/repodata/repomd.xml 
+                                gpg --detach-sign --armor \${dest_path}/SRPMS/repodata/repomd.xml 
                             done
 
                         popd

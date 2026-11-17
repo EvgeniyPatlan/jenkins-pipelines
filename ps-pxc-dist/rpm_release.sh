@@ -1,5 +1,6 @@
 set -x
 set -e
+gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
 #
 DIRECTORIES=""
 source /tmp/args_pipeline
@@ -53,7 +54,7 @@ for REPOPATH in $REPOPATH_TMP; do
 	      if [ -f /srv/${REPOPATH}/${REPOCOMP}/${rhel}/SRPMS/repodata/repomd.xml.asc ]; then
                   rm -f /srv/${REPOPATH}/${REPOCOMP}/${rhel}/SRPMS/repodata/repomd.xml.asc
               fi
-	      gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} /srv/${REPOPATH}/${REPOCOMP}/${rhel}/SRPMS/repodata/repomd.xml
+	      gpg --detach-sign --armor /srv/${REPOPATH}/${REPOCOMP}/${rhel}/SRPMS/repodata/repomd.xml
           done
         fi
         #
@@ -68,7 +69,7 @@ for REPOPATH in $REPOPATH_TMP; do
 		if [ -f /srv/${REPOPATH}/${REPOCOMP}/${rhel}/RPMS/${arch}/repodata/repomd.xml.asc ]; then
                     rm -f /srv/${REPOPATH}/${REPOCOMP}/${rhel}/RPMS/${arch}/repodata/repomd.xml.asc
 		fi
-		gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} /srv/${REPOPATH}/${REPOCOMP}/${rhel}/RPMS/${arch}/repodata/repomd.xml
+		gpg --detach-sign --armor /srv/${REPOPATH}/${REPOCOMP}/${rhel}/RPMS/${arch}/repodata/repomd.xml
             done
         done
         #

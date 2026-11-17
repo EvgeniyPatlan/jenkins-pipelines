@@ -3,14 +3,15 @@ def call(String REPO_NAME, String DESTINATION) {
         unstash 'uploadPath'
         def path_to_build = sh(returnStdout: true, script: "cat uploadPath").trim()
 
-        withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+        withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
             withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
                 sh """
                     cat /etc/hosts > ./hosts
                     echo '10.30.6.9 repo.ci.percona.com' >> ./hosts
                     sudo cp ./hosts /etc || true
 
-                    ssh -o StrictHostKeyChecking=no -i ${KEY_PATH} ${USER}@repo.ci.percona.com ' \
+                    ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com ' \
+                        gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                         set -o errexit
                         set -o xtrace
 
@@ -34,7 +35,7 @@ def call(String REPO_NAME, String DESTINATION) {
                                     if [ -f \${repo_path}/repodata/repomd.xml.asc ]; then
                                         rm -f \${repo_path}/repodata/repomd.xml.asc
                                     fi
-                                    gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} \${repo_path}/repodata/repomd.xml 
+                                    gpg --detach-sign --armor \${repo_path}/repodata/repomd.xml 
                                 done
 
                                 # SRPMS
@@ -46,7 +47,7 @@ def call(String REPO_NAME, String DESTINATION) {
                                 if [ -f \${rpm_dest_path}/SRPMS/repodata/repomd.xml.asc ]; then
                                     rm -f \${rpm_dest_path}/SRPMS/repodata/repomd.xml.asc
                                 fi
-                                gpg --detach-sign --armor --passphrase ${SIGN_PASSWORD} \${rpm_dest_path}/SRPMS/repodata/repomd.xml 
+                                gpg --detach-sign --armor \${rpm_dest_path}/SRPMS/repodata/repomd.xml 
                             done
 
                             if [ "x${DESTINATION}" == "xrelease" ]; then
@@ -61,7 +62,7 @@ def call(String REPO_NAME, String DESTINATION) {
                                  if [ \${EC} -eq 0 ]; then
                                      REPOPUSH_ARGS=" --remove-package "
                                  fi
-                                 env PATH=/usr/local/reprepro5/bin:${PATH} repopush \${REPOPUSH_ARGS} --gpg-pass ${SIGN_PASSWORD} --package \${deb} --verbose --component ${DESTINATION} --codename \${dist} --repo-path /srv/repo-copy/${REPO_NAME}/apt
+                                 env PATH=/usr/local/reprepro5/bin:${PATH} repopush \${REPOPUSH_ARGS} --package \${deb} --verbose --component ${DESTINATION} --codename \${dist} --repo-path /srv/repo-copy/${REPO_NAME}/apt
                                 done
                             done
                         popd

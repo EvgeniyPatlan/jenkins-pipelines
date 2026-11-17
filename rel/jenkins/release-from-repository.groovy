@@ -54,7 +54,7 @@ pipeline {
     stages {
         stage('Push to RPM repository') {
             steps {
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', usernameVariable: 'USER')]) {
                         sh """ 
                             if [ ${SKIP_RPM_PUSH} = false ]; then
@@ -62,7 +62,8 @@ pipeline {
                                     echo "Empty path!"
                                     exit 1
                                 fi
-                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                    gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                                     set -o errexit
                                     set -o xtrace
                                     echo /srv/UPLOAD/${PATH_TO_BUILD}
@@ -105,7 +106,7 @@ pipeline {
                                             if [[ -f /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/SRPMS/repodata/repomd.xml.asc ]]; then
                                                 rm -f /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/SRPMS/repodata/repomd.xml.asc
                                             fi
-                                            gpg --detach-sign --armor --passphrase $SIGN_PASSWORD /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/SRPMS/repodata/repomd.xml
+                                            gpg --detach-sign --armor /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/SRPMS/repodata/repomd.xml
                                         done
                                     fi
                                     # -------------------------------------> binary processing
@@ -119,7 +120,7 @@ pipeline {
                                             if [ -f  /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/RPMS/\${arch}/repodata/repomd.xml.asc ]; then
                                                 rm -f  /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/RPMS/\${arch}/repodata/repomd.xml.asc
                                             fi
-                                            gpg --detach-sign --armor --passphrase $SIGN_PASSWORD /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/RPMS/\${arch}/repodata/repomd.xml
+                                            gpg --detach-sign --armor /srv/\${REPOPATH}/\${REPOCOMP}/\${rhel}/RPMS/\${arch}/repodata/repomd.xml
                                         done
                                     done
                                     date +%s > /srv/repo-copy/\${PRO_FOLDER}version
@@ -134,7 +135,7 @@ ENDSSH
         }
         stage('Push to DEB repository') {
             steps {
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', usernameVariable: 'USER')]) {
                         sh """
                             if [ ${SKIP_DEB_PUSH} = false ]; then
@@ -142,7 +143,8 @@ ENDSSH
                                     echo "Empty path!"
                                     exit 1
                                 fi
-                                ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                    gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                                     set -o errexit
                                     set -o xtrace
                                     cd /srv/UPLOAD/${PATH_TO_BUILD}
@@ -194,7 +196,7 @@ ENDSSH
                                                 echo "<*> DSC file is "\${DSC_FILE}
                                                 for _codename in \${CODENAMES}; do
                                                     echo "<*> CODENAME: "\${_codename}
-                                                    repopush --gpg-pass=${SIGN_PASSWORD} --package=\${DSC_FILE} --repo-path=\${REPOPATH} --component=\${REPOCOMP}  --codename=\${_codename} --verbose \${REPOPUSH_ARGS} || true
+                                                    repopush --package=\${DSC_FILE} --repo-path=\${REPOPATH} --component=\${REPOCOMP}  --codename=\${_codename} --verbose \${REPOPUSH_ARGS} || true
                                                     sleep 5
                                                 done
                                             done
@@ -207,7 +209,7 @@ ENDSSH
                                         pushd \${_codename}
                                         DEBS=\$(find . -type f -name '*.*deb' )
                                         for _deb in \${DEBS}; do
-                                            repopush --gpg-pass=${SIGN_PASSWORD} --package=\${_deb} --repo-path=\${REPOPATH} --component=\${REPOCOMP} --codename=\${_codename} --verbose \${REPOPUSH_ARGS}
+                                            repopush --package=\${_deb} --repo-path=\${REPOPATH} --component=\${REPOCOMP} --codename=\${_codename} --verbose \${REPOPUSH_ARGS}
                                         done
                                         popd
                                     done

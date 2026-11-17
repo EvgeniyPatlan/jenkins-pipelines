@@ -44,10 +44,11 @@ pipeline {
                         error("ERROR: empty parameter(s) PATH_TO_CLIENT_AMD64 or PATH_TO_CLIENT_ARM64")
                     }
                 }
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
                         sh """
-                            ssh -o StrictHostKeyChecking=no -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                                 set -x
                                 set -e
 
@@ -72,7 +73,7 @@ pipeline {
                                             if [ -f /srv/\${REPOPATH}/release/\${rhel}/SRPMS/repodata/repomd.xml.asc ]; then
                                                 rm -f /srv/\${REPOPATH}/release/\${rhel}/SRPMS/repodata/repomd.xml.asc
                                             fi
-                                            gpg --detach-sign --armor --passphrase $SIGN_PASSWORD /srv/\${REPOPATH}/release/\${rhel}/SRPMS/repodata/repomd.xml
+                                            gpg --detach-sign --armor /srv/\${REPOPATH}/release/\${rhel}/SRPMS/repodata/repomd.xml
                                         done
                                     fi
 
@@ -87,7 +88,7 @@ pipeline {
                                             if [ -f  /srv/\${REPOPATH}/release/\${rhel}/RPMS/\${arch}/repodata/repomd.xml.asc ]; then
                                                 rm -f  /srv/\${REPOPATH}/release/\${rhel}/RPMS/\${arch}/repodata/repomd.xml.asc
                                             fi
-                                            gpg --detach-sign --armor --passphrase $SIGN_PASSWORD /srv/\${REPOPATH}/release/\${rhel}/RPMS/\${arch}/repodata/repomd.xml
+                                            gpg --detach-sign --armor /srv/\${REPOPATH}/release/\${rhel}/RPMS/\${arch}/repodata/repomd.xml
                                         done
                                     done
                                 done
@@ -100,10 +101,11 @@ ENDSSH
 
         stage('Push DEB client to public repository') {
             steps {
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
                         sh """
-                            ssh -o StrictHostKeyChecking=no -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                                gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
                                 set -e
 
                                 # We are only pushing to 'pmm3-client' repository
@@ -133,7 +135,7 @@ ENDSSH
                                             echo DSC file is \${DSC_FILE}
                                             for _codename in \${CODENAMES}; do
                                                 echo ===>DSC \$DSC_FILE
-                                                repopush --gpg-pass=${SIGN_PASSWORD} --package=\${DSC_FILE} --repo-path=\${REPOPATH} --component=main  --codename=\${_codename} --verbose || true
+                                                repopush --package=\${DSC_FILE} --repo-path=\${REPOPATH} --component=main  --codename=\${_codename} --verbose || true
                                                 if [ -f \${REPOPATH}/db/lockfile ]; then
                                                     sudo rm -vf \${REPOPATH}/db/lockfile
                                                 fi
@@ -151,7 +153,7 @@ ENDSSH
                                         pushd \${_codename}
                                             DEBS=\$(find . -type f -name '*.*deb')
                                             for _deb in \${DEBS}; do
-                                                repopush --gpg-pass=${SIGN_PASSWORD} --package=\${_deb} --repo-path=\${REPOPATH} --component=main --codename=\${_codename} --verbose
+                                                repopush --package=\${_deb} --repo-path=\${REPOPATH} --component=main --codename=\${_codename} --verbose
                                             done
                                         popd
                                     done

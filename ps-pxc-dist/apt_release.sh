@@ -1,3 +1,4 @@
+gpg-connect-agent "keyinfo --list" /bye | grep -q " - 1 " || { echo "ERROR: no signing key passphrase is cached in gpg-agent on repo.ci" >&2; exit 1; }
 export GPG_TTY=$(tty)
 echo GPG_TTY is ${GPG_TTY}
 #
@@ -76,7 +77,7 @@ for REPOPATH in $REPOPATH_TMP; do
                     echo "DSC file is ${DSC_FILE}"
                     for _codename in ${CODENAMES}; do
                         echo "===>DSC $DSC_FILE"
-                        repopush --gpg-pass=${SIGN_PASSWORD} --package=${DSC_FILE} --repo-path=${REPOPATH} --component=${REPOCOMP}  --codename=${_codename} --verbose ${REPOPUSH_ARGS}
+                        repopush --package=${DSC_FILE} --repo-path=${REPOPATH} --component=${REPOCOMP}  --codename=${_codename} --verbose ${REPOPUSH_ARGS}
                         sleep 1
                     done
                 done
@@ -93,7 +94,7 @@ for REPOPATH in $REPOPATH_TMP; do
             pushd ${_codename}
                 DEBS=$(find . -type f -name '*.*deb' )
                 for _deb in ${DEBS}; do
-                    repopush --gpg-pass=${SIGN_PASSWORD} --package=${_deb} --repo-path=${REPOPATH} --component=${REPOCOMP} --codename=${_codename} --verbose ${REPOPUSH_ARGS}
+                    repopush --package=${_deb} --repo-path=${REPOPATH} --component=${REPOCOMP} --codename=${_codename} --verbose ${REPOPUSH_ARGS}
                 done
             #
             popd

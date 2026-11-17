@@ -132,7 +132,8 @@ pipeline {
                 expression { params.SKIP_RPM == false }
             }
             steps {
-                withCredentials([string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD')]) {
+                checkout scm
+                withCredentials([file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
                         sh """
                             for var in "\$(printenv | grep _PATH | sed 's/KEY_PATH.*//')"; do
@@ -148,11 +149,10 @@ pipeline {
                             echo "PUSHFOCAL=\${PUSHFOCAL}" >> args_pipeline
                             echo "PUSHTRIXIE=\${PUSHTRIXIE}" >> args_pipeline
                             echo "\$(awk '{\$1="export" OFS \$1} 1' args_pipeline)" > args_pipeline
-                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=no -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
-                            ssh -o StrictHostKeyChecking=no -i \$KEY_PATH \$USER@repo.ci.percona.com " \
-                                export SIGN_PASSWORD=\${SIGN_PASSWORD}
+                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
+                            rsync -aHv -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" ps-pxc-dist/rpm_release.sh \$USER@repo.ci.percona.com:rpm_release.sh
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH \$USER@repo.ci.percona.com " \
                                 bash -x /tmp/args_pipeline
-                                wget https://raw.githubusercontent.com/Percona-Lab/jenkins-pipelines/master/ps-pxc-dist/rpm_release.sh -O rpm_release.sh
                                 bash -xe rpm_release.sh
                             "
                         """
@@ -165,8 +165,9 @@ pipeline {
                 expression { params.SKIP_APT == false }
             }
             steps {
+                checkout scm
                 withCredentials([
-                    string(credentialsId: 'SIGN_PASSWORD', variable: 'SIGN_PASSWORD'),
+                    file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS'),
                     sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')
                     ]){
                         sh """
@@ -182,11 +183,10 @@ pipeline {
                             echo "PUSHFOCAL=\${PUSHFOCAL}" >> args_pipeline
                             echo "PUSHTRIXIE=\${PUSHTRIXIE}" >> args_pipeline
                             echo "\$(awk '{\$1="export" OFS \$1} 1' args_pipeline)" > args_pipeline
-                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=no -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
-                            ssh -o StrictHostKeyChecking=no -i \$KEY_PATH \$USER@repo.ci.percona.com " \
-                                export SIGN_PASSWORD=\${SIGN_PASSWORD}
+                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
+                            rsync -aHv -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" ps-pxc-dist/apt_release.sh \$USER@repo.ci.percona.com:apt_release.sh
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH \$USER@repo.ci.percona.com " \
                                 bash -x /tmp/args_pipeline
-                                wget https://raw.githubusercontent.com/Percona-Lab/jenkins-pipelines/master/ps-pxc-dist/apt_release.sh -O apt_release.sh
                                 bash -xe apt_release.sh
                             "
                         """
@@ -198,16 +198,17 @@ pipeline {
                 expression { params.SKIP_SYNC == false }
             }
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
+                checkout scm
+                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER'), file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     sh """
                             echo "REPOSITORY=\${REPOSITORY}" >> args_pipeline
                             echo "REPOSITORY_VERSION=\${REPOSITORY_VERSION}" >> args_pipeline
                             echo "REPOSITORY_VERSION_MAJOR=\${REPOSITORY_VERSION_MAJOR}" >> args_pipeline
                             echo "\$(awk '{\$1="export" OFS \$1} 1' args_pipeline)" > args_pipeline
-                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=no -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
-                            ssh -o StrictHostKeyChecking=no -i \$KEY_PATH \$USER@repo.ci.percona.com " \
+                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
+                            rsync -aHv -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" ps-pxc-dist/sync_repos_prod.sh \$USER@repo.ci.percona.com:sync_repos_prod.sh
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH \$USER@repo.ci.percona.com " \
                                 bash -x /tmp/args_pipeline
-                                wget https://raw.githubusercontent.com/Percona-Lab/jenkins-pipelines/master/ps-pxc-dist/sync_repos_prod.sh -O sync_repos_prod.sh
                                 bash -xe sync_repos_prod.sh
                         "
                 """
@@ -219,7 +220,8 @@ pipeline {
                 expression { params.SKIP_PRODUCTION_DOWNLOADS == false }
             }
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER')]) {
+                checkout scm
+                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', passphraseVariable: '', usernameVariable: 'USER'), file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     sh """
                         if [ "\${COMPONENT}" == "RELEASE" ]; then
                            for var in "\$(printenv | grep _PATH | sed 's/KEY_PATH.*//')"; do
@@ -229,10 +231,10 @@ pipeline {
                             echo "REPOSITORY_VERSION=\${REPOSITORY_VERSION}" >> args_pipeline
                             echo "COMPONENT=\${COMPONENT}" >> args_pipeline
                             echo "\$(awk '{\$1="export" OFS \$1} 1' args_pipeline)" > args_pipeline
-                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=no -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
-                            ssh -o StrictHostKeyChecking=no -i \$KEY_PATH \$USER@repo.ci.percona.com " \
+                            rsync -aHv --delete -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" args_pipeline \$USER@repo.ci.percona.com:/tmp/args_pipeline
+                            rsync -aHv -e "ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH" ps-pxc-dist/downloads_release.sh \$USER@repo.ci.percona.com:downloads_release.sh
+                            ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\$KNOWN_HOSTS -i \$KEY_PATH \$USER@repo.ci.percona.com " \
                                 bash -x /tmp/args_pipeline
-                                wget https://raw.githubusercontent.com/Percona-Lab/jenkins-pipelines/master/ps-pxc-dist/downloads_release.sh -O downloads_release.sh
                                 bash -xe downloads_release.sh
                             "
                         fi
@@ -245,9 +247,9 @@ pipeline {
                 expression { params.SKIP_PRODUCTION_REFRESH == false }
             }
             steps {
-                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', usernameVariable: 'USER')]) {
+                withCredentials([sshUserPrivateKey(credentialsId: 'repo.ci.percona.com', keyFileVariable: 'KEY_PATH', usernameVariable: 'USER'), file(credentialsId: 'REPO_CI_KNOWN_HOSTS', variable: 'KNOWN_HOSTS')]) {
                     sh """
-                       ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
+                       ssh -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\${KNOWN_HOSTS} -i ${KEY_PATH} ${USER}@repo.ci.percona.com << 'ENDSSH'
                            if [ ${COMPONENT} = RELEASE ]; then
                                curl -k https://www.percona.com/admin/config/percona/percona_downloads/crawl_directory
                            fi
